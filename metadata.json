@@ -1,0 +1,5 @@
+{
+  "name": "鱼群粒子系统 (Fish School Particle System)",
+  "description": "一个高性能的 p5.js 鱼群模拟系统，支持贝塞尔曲线绘制、精灵图预渲染、深度排序、以及基于向量差的排斥交互。",
+  "requestFramePermissions": []
+}
