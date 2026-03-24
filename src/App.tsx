@@ -10,11 +10,11 @@ import p5 from 'p5';
 const BG_COLOR = '#0a192f';
 const FISH_COLOR = '#3498db';
 const SPOT_COLOR = '#2980b9';
-const ORB_COLOR = '#ff69b4';
+const ORB_COLOR = '#ff4757'; // 鲜艳的红色
 const EYE_COLOR = '#ffffff';
 const EYE_PUPIL = '#000000';
 
-const FISH_COUNT = 120;
+const FISH_COUNT = 200;
 const SPRITE_FRAMES = 20; // 动画帧数
 const FISH_WIDTH = 60;
 const FISH_HEIGHT = 30;
@@ -150,15 +150,22 @@ export default function App() {
         }
 
         reset() {
-          // 在对边重新出现
           let angleRad = p.radians(GLOBAL_ANGLE);
-          if (p.cos(angleRad) > 0) {
-            this.pos.x = -50;
+          let vx = p.cos(angleRad);
+          let vy = p.sin(angleRad);
+
+          // 随机选择重置到左/右边缘还是上/下边缘，以保持均匀分布
+          // 根据运动方向选择“入口”边缘
+          if (p.random() > 0.5) {
+            // 重置到 X 轴边缘 (左或右)
+            this.pos.x = vx > 0 ? -100 : p.width + 100;
             this.pos.y = p.random(p.height);
           } else {
-            this.pos.x = p.width + 50;
-            this.pos.y = p.random(p.height);
+            // 重置到 Y 轴边缘 (上或下)
+            this.pos.x = p.random(p.width);
+            this.pos.y = vy > 0 ? -100 : p.height + 100;
           }
+          
           this.offsetX = 0;
           this.offsetY = 0;
         }
@@ -192,24 +199,29 @@ export default function App() {
         vel: p5.Vector;
 
         constructor() {
-          this.pos = p.createVector(p.width * 0.8, p.height * 0.8);
-          this.vel = p.createVector(-2, -1.2);
+          // 初始位置在屏幕右侧或上方，准备逆流而上
+          this.pos = p.createVector(p.width * 0.9, p.height * 0.1);
+          
+          // 逆着全局角度游动 (GLOBAL_ANGLE + 180)
+          let oppositeAngle = p.radians(GLOBAL_ANGLE + 180);
+          let speed = 2.5;
+          this.vel = p.createVector(p.cos(oppositeAngle) * speed, p.sin(oppositeAngle) * speed);
         }
 
         update() {
-          this.pos.add(this.vel);
+          this.pos.x += this.vel.x;
+          this.pos.y += this.vel.y;
 
-          // 边界反弹 (简单处理)
-          if (this.pos.x < 0 || this.pos.x > p.width) this.vel.x *= -1;
-          if (this.pos.y < 0 || this.pos.y > p.height) this.vel.y *= -1;
+          // 屏幕环绕：确保它始终从鱼群的前方出现并逆流而行
+          if (this.pos.x < -50) this.pos.x = p.width + 50;
+          if (this.pos.x > p.width + 50) this.pos.x = -50;
+          if (this.pos.y < -50) this.pos.y = p.height + 50;
+          if (this.pos.y > p.height + 50) this.pos.y = -50;
 
-          // 触发 flushOut
-          if (!flushOut && this.pos.x < p.width * 0.25) {
+          // 触发 flushOut (当红鱼靠近鱼群密集区时触发加速反应)
+          if (!flushOut && p.dist(this.pos.x, this.pos.y, p.width * 0.5, p.height * 0.5) < 200) {
             flushOut = true;
             flushStartTime = p.millis();
-            // 固定回退航向
-            let angleRad = p.radians(GLOBAL_ANGLE);
-            this.vel = p.createVector(p.cos(angleRad) * 8, p.sin(angleRad) * 8);
           }
         }
 
@@ -218,14 +230,30 @@ export default function App() {
           p.translate(this.pos.x, this.pos.y);
           p.rotate(this.vel.heading());
           
-          // 绘制粉鱼
+          // 绘制红鱼身体
           p.noStroke();
           p.fill(ORB_COLOR);
           p.ellipse(0, 0, 40, 20);
+          
+          // 鱼尾摆动
+          let tailPhase = p.sin(p.millis() * 0.01);
+          p.push();
+          p.translate(-18, 0);
+          p.rotate(tailPhase * 0.3);
+          p.beginShape();
+          p.vertex(0, 0);
+          p.bezierVertex(-10, -10, -15, -15, -20, -10);
+          p.bezierVertex(-18, -5, -18, 5, -20, 10);
+          p.bezierVertex(-15, 15, -10, 10, 0, 0);
+          p.endShape(p.CLOSE);
+          p.pop();
+
+          // 眼睛
           p.fill(255, 150);
-          p.ellipse(10, -4, 8, 8); // 眼睛
+          p.ellipse(10, -4, 8, 8);
           p.fill(0);
           p.ellipse(11, -4, 4, 4);
+          
           p.pop();
         }
       }
