@@ -7,18 +7,17 @@ import React, { useEffect, useRef } from 'react';
 import p5 from 'p5';
 
 // --- 配置变量 ---
-const BG_COLOR = '#0a192f';
-const FISH_COLOR = '#3498db';
-const SPOT_COLOR = '#2980b9';
-const ORB_COLOR = '#ff4757'; // 鲜艳的红色
+const BG_COLOR = '#e1f5fe'; // 浅蓝色背景
+const FISH_COLOR = '#0288d1'; // 稍深一点的蓝色鱼身
+const SPOT_COLOR = '#01579b'; // 更深的蓝色斑点
+const ORB_COLOR = '#ff1744'; // 鲜艳的红色
 const EYE_COLOR = '#ffffff';
 const EYE_PUPIL = '#000000';
 
-const FISH_COUNT = 200;
+const FISH_COUNT = 500; // 增加数量以提高密度
 const SPRITE_FRAMES = 20; // 动画帧数
 const FISH_WIDTH = 60;
 const FISH_HEIGHT = 30;
-const REPULSION_RADIUS = 150;
 const FRICTION = 0.92; // 摩擦力系数
 const FLUSH_FRICTION = 0.85; // flushOut 时的摩擦力系数（更紧凑）
 
@@ -124,15 +123,12 @@ export default function App() {
           // 水流起伏感 (正弦波)
           this.pos.y += p.sin(p.frameCount * 0.05 + this.phaseOffset) * 0.5;
 
-          // 排斥逻辑
+          // 碰撞检测 (当红鱼穿过蓝鱼时，蓝鱼产生轻微抖动)
           if (orb && orb.pos) {
-            let d = p.dist(this.pos.x + this.offsetX, this.pos.y + this.offsetY, orb.pos.x, orb.pos.y);
-            if (d < REPULSION_RADIUS) {
-              let force = p.map(d, 0, REPULSION_RADIUS, 15, 0);
-              let dir = p.createVector(this.pos.x + this.offsetX - orb.pos.x, this.pos.y + this.offsetY - orb.pos.y);
-              dir.normalize();
-              this.offsetX += dir.x * force;
-              this.offsetY += dir.y * force;
+            let d = p.dist(this.pos.x, this.pos.y, orb.pos.x, orb.pos.y);
+            if (d < 40) {
+              this.offsetX += p.random(-5, 5);
+              this.offsetY += p.random(-5, 5);
             }
           }
 
@@ -301,7 +297,7 @@ export default function App() {
         orb.draw();
 
         // UI 提示
-        p.fill(255, 100);
+        p.fill(0, 100); // 改为黑色半透明
         p.noStroke();
         p.textSize(14);
         p.text(`Fish Count: ${FISH_COUNT} | FlushOut: ${flushOut ? 'ON' : 'OFF'}`, 20, 30);
