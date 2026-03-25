@@ -8,17 +8,17 @@ import p5 from 'p5';
 import { ObjectDetector, HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
 const FLOWER_COLORS = [
-  [330, 80, 100], // 粉色
-  [280, 70, 100], // 紫色
-  [200, 60, 100], // 浅蓝
-  [45, 90, 100],  // 橙黄
-  [10, 80, 100],  // 红色
+  [330, 40, 100], // 梦幻粉
+  [280, 30, 100], // 梦幻紫
+  [200, 30, 100], // 梦幻蓝
+  [180, 40, 100], // 梦幻青
+  [300, 20, 100], // 珍珠白
 ];
 
 const METEOR_COLORS = [
-  [50, 100, 100],  // 金色
-  [180, 100, 100], // 蓝绿
-  [300, 100, 100], // 紫红
+  [45, 90, 100],   // 金黄色
+  [55, 100, 100],  // 明黄色
+  [40, 80, 100],   // 琥珀色
 ];
 
 export default function App() {
@@ -35,11 +35,13 @@ export default function App() {
     let lastVideoTime = -1;
     let results: any = null;
     let handResults: any = null;
+    let handsMerged = false;
+    let lastMergeTime = 0;
 
     const initMediaPipe = async () => {
       try {
         const vision = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/wasm"
         );
         
         // 初始化物体识别
@@ -65,7 +67,7 @@ export default function App() {
         setIsLoading(false);
       } catch (err) {
         console.error("MediaPipe initialization failed:", err);
-        setError("无法加载识别模型。请检查网络连接或刷新页面重试。");
+        setError(`无法加载识别模型 (MediaPipe): ${err instanceof Error ? err.message : '网络连接失败'}。请检查网络或尝试刷新页面。`);
       }
     };
 
@@ -75,6 +77,7 @@ export default function App() {
       let flowers: GrowingFlower[] = [];
       let groundFlowers: GroundFlower[] = [];
       let meteors: Meteor[] = [];
+      let butterflies: Butterfly[] = [];
       let particles: MagicParticle[] = [];
       let canvas: p5.Renderer;
       let detectedObjects: any[] = [];
@@ -103,7 +106,11 @@ export default function App() {
             }
           }).catch(err => {
             console.error("Camera access denied:", err);
-            setError("无法访问摄像头，请确保已授予权限。");
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+              setError("摄像头访问被拒绝。请在浏览器地址栏点击摄像头图标并选择“允许”，然后刷新页面。");
+            } else {
+              setError(`无法访问摄像头: ${err.message || '未知错误'}`);
+            }
           });
         }
       };
@@ -236,6 +243,29 @@ export default function App() {
         }
 
         // 4. 处理手部魔法 (流星 & 颗粒 & 捏合)
+        if (detectedHands.length >= 2) {
+          const h1 = detectedHands[0][0];
+          const h2 = detectedHands[1][0];
+          const d = p.dist(h1.x, h1.y, h2.x, h2.y);
+          
+          if (d < 0.15) {
+            handsMerged = true;
+            lastMergeTime = p.millis();
+            // 产生汇聚光点 (金色仙粉)
+            const midX = p.width - (offsetX + (h1.x + h2.x) / 2 * dw);
+            const midY = offsetY + (h1.y + h2.y) / 2 * dh;
+            for(let i=0; i<3; i++) particles.push(new MagicParticle(p, midX, midY, true));
+          } else if (handsMerged && d > 0.3) {
+            // 手心合拢后打开，释放蝴蝶
+            const midX = p.width - (offsetX + (h1.x + h2.x) / 2 * dw);
+            const midY = offsetY + (h1.y + h2.y) / 2 * dh;
+            butterflies.push(new Butterfly(p, midX, midY));
+            handsMerged = false;
+            // 爆发光效 (金色仙粉)
+            for(let i=0; i<20; i++) particles.push(new MagicParticle(p, midX, midY, true));
+          }
+        }
+
         if (detectedHands.length > 0) {
           let totalHandX = 0;
           for (let i = 0; i < detectedHands.length; i++) {
@@ -245,21 +275,21 @@ export default function App() {
             const mappedY = offsetY + wrist.y * dh;
             const currentPos = p.createVector(mappedX, mappedY);
 
-            // 产生随动作掉落的魔法颗粒
+            // 产生随动作掉落的魔法颗粒 (金色仙粉)
             if (prevHandPos[i]) {
               const dist = p.dist(currentPos.x, currentPos.y, prevHandPos[i].x, prevHandPos[i].y);
               if (dist > 5) {
                 for (let j = 0; j < 2; j++) {
-                  particles.push(new MagicParticle(p, mappedX, mappedY));
+                  particles.push(new MagicParticle(p, mappedX, mappedY, true));
                 }
               }
             }
             prevHandPos[i] = currentPos;
             totalHandX += mappedX;
 
-            // 判断是否张开手掌 (流星)
+            // 判断是否张开手掌 (流星) - 增加 handsMerged 检查
             const isPalmOpen = (p as any).checkPalmOpen(hand);
-            if (isPalmOpen) {
+            if (isPalmOpen && !handsMerged) {
               const palmX = (hand[0].x + hand[5].x + hand[17].x) / 3;
               const palmY = (hand[0].y + hand[5].y + hand[17].y) / 3;
               const centerX = p.width - (offsetX + palmX * dw);
@@ -288,6 +318,13 @@ export default function App() {
           swayFactor = p.lerp(swayFactor, 0, 0.05);
         }
 
+        // 更新和绘制蝴蝶
+        for (let i = butterflies.length - 1; i >= 0; i--) {
+          butterflies[i].update(particles);
+          butterflies[i].display();
+          if (butterflies[i].isDead()) butterflies.splice(i, 1);
+        }
+
         // 更新和绘制魔法颗粒
         for (let i = particles.length - 1; i >= 0; i--) {
           particles[i].update();
@@ -313,7 +350,7 @@ export default function App() {
 
         // 更新和绘制流星
         for (let i = meteors.length - 1; i >= 0; i--) {
-          meteors[i].update();
+          meteors[i].update(particles);
           meteors[i].display();
           if (meteors[i].isDead()) {
             meteors.splice(i, 1);
@@ -321,18 +358,19 @@ export default function App() {
         }
       };
 
-      // 检查手掌是否张开
+      // 检查手掌是否完全张开
       (p as any).checkPalmOpen = (hand: any[]) => {
         const wrist = hand[0];
-        const fingers = [8, 12, 16, 20]; // 指尖
-        const bases = [5, 9, 13, 17];    // 指根
+        const fingers = [4, 8, 12, 16, 20]; // 指尖 (含大拇指)
+        const bases = [2, 5, 9, 13, 17];    // 指根
         let openCount = 0;
         for (let i = 0; i < fingers.length; i++) {
           const tipDist = p.dist(wrist.x, wrist.y, hand[fingers[i]].x, hand[fingers[i]].y);
           const baseDist = p.dist(wrist.x, wrist.y, hand[bases[i]].x, hand[bases[i]].y);
+          // 增加判断阈值，确保手指完全伸直
           if (tipDist > baseDist * 1.2) openCount++;
         }
-        return openCount >= 3;
+        return openCount === 5; // 必须 5 根手指全部张开
       };
 
       // 检查是否捏合 (大拇指和食指)
@@ -363,6 +401,7 @@ export default function App() {
       isFalling: boolean = false;
       stemPoints: p5.Vector[] = [];
       fallTimer: number;
+      shapeType: number;
 
       constructor(p: p5, x: number, y: number) {
         this.p = p;
@@ -370,13 +409,14 @@ export default function App() {
         this.targetPos = p.createVector(x, y);
         this.vel = p.createVector(0, 0);
         this.growth = 0;
-        this.maxGrowth = p.random(30, 60);
+        this.maxGrowth = p.random(80, 140); // 进一步增大花朵
         this.life = this.maxLife;
-        this.fallTimer = p.random(100, 200); // 生长一段时间后掉落
+        this.fallTimer = p.random(150, 300);
+        this.shapeType = p.floor(p.random(3)); // 随机形状类型
         
         const color = p.random(FLOWER_COLORS);
         this.hue = color[0];
-        this.petals = p.floor(p.random(5, 8));
+        this.petals = p.floor(p.random(6, 12)); // 更多花瓣
 
         for (let i = 0; i < 5; i++) {
           this.stemPoints.push(p.createVector(p.random(-5, 5), -i * 10));
@@ -450,15 +490,40 @@ export default function App() {
 
       drawFlowerHead(size: number) {
         this.p.noStroke();
-        this.p.fill(this.hue, 70, 100, this.growth);
+        // 绘制花瓣，使用渐变感
         for (let i = 0; i < this.petals; i++) {
           this.p.push();
           this.p.rotate((this.p.TWO_PI / this.petals) * i);
-          this.p.ellipse(size * 0.4, 0, size * 0.6, size * 0.3);
+          
+          // 渐变效果：多层绘制
+          for (let j = 0; j < 3; j++) {
+            const layerSize = size * (1 - j * 0.2);
+            const layerBright = 100 - j * 5;
+            this.p.fill(this.hue, 30 - j * 5, layerBright, this.growth * 0.5); // 梦幻透明
+            
+            this.p.beginShape();
+            if (this.shapeType === 0) {
+              // 尖瓣
+              this.p.vertex(0, 0);
+              this.p.bezierVertex(layerSize * 0.5, -layerSize * 0.3, layerSize * 0.8, 0, layerSize * 0.5, layerSize * 0.3);
+            } else if (this.shapeType === 1) {
+              // 圆瓣
+              this.p.ellipse(layerSize / 2, 0, layerSize, layerSize * 0.6);
+            } else {
+              // 心形/复瓣
+              this.p.vertex(0, 0);
+              this.p.bezierVertex(layerSize * 0.4, -layerSize * 0.6, layerSize * 1.2, -layerSize * 0.2, layerSize * 0.5, 0);
+              this.p.bezierVertex(layerSize * 1.2, layerSize * 0.2, layerSize * 0.4, layerSize * 0.6, 0, 0);
+            }
+            this.p.endShape(this.p.CLOSE);
+          }
           this.p.pop();
         }
-        this.p.fill(60, 80, 100, this.growth);
-        this.p.ellipse(0, 0, size * 0.3);
+        // 花蕊
+        this.p.fill(60, 90, 100, this.growth * 0.8);
+        this.p.ellipse(0, 0, size * 0.4);
+        this.p.fill(45, 100, 100, this.growth * 0.8);
+        this.p.ellipse(0, 0, size * 0.2);
       }
 
       isDead() {
@@ -475,15 +540,17 @@ export default function App() {
       petals: number;
       sway: number = 0;
       life: number = 1.0;
+      shapeType: number;
 
       constructor(p: p5, x: number, y: number) {
         this.p = p;
         this.pos = p.createVector(x, y);
         this.growth = 0;
-        this.maxGrowth = p.random(40, 100);
+        this.maxGrowth = p.random(100, 180); // 更大的地面花
+        this.shapeType = p.floor(p.random(3));
         const color = p.random(FLOWER_COLORS);
         this.hue = color[0];
-        this.petals = p.floor(p.random(5, 8));
+        this.petals = p.floor(p.random(6, 12));
       }
 
       update(swayFactor: number) {
@@ -508,17 +575,29 @@ export default function App() {
         this.p.translate(this.sway, -h);
         this.p.rotate(this.p.frameCount * 0.02);
         
-        const size = 20 * this.growth;
+        const size = 35 * this.growth; // 增大尺寸
         this.p.noStroke();
-        this.p.fill(this.hue, 70, 100, this.life);
         for (let i = 0; i < this.petals; i++) {
           this.p.push();
           this.p.rotate((this.p.TWO_PI / this.petals) * i);
-          this.p.ellipse(size * 0.4, 0, size * 0.6, size * 0.3);
+          // 灵动花瓣
+          this.p.fill(this.hue, 40, 100, this.life * 0.5); // 梦幻透明
+          
+          this.p.beginShape();
+          if (this.shapeType === 0) {
+            this.p.vertex(0, 0);
+            this.p.bezierVertex(size * 0.6, -size * 0.4, size, 0, size * 0.6, size * 0.4);
+          } else if (this.shapeType === 1) {
+            this.p.ellipse(size / 2, 0, size, size * 0.7);
+          } else {
+            this.p.vertex(0, 0);
+            this.p.bezierVertex(size * 0.5, -size * 0.8, size * 1.5, 0, size * 0.5, size * 0.8);
+          }
+          this.p.endShape(this.p.CLOSE);
           this.p.pop();
         }
-        this.p.fill(60, 80, 100, this.life);
-        this.p.ellipse(0, 0, size * 0.3);
+        this.p.fill(60, 90, 100, this.life);
+        this.p.ellipse(0, 0, size * 0.4);
         
         this.p.pop();
       }
@@ -535,29 +614,44 @@ export default function App() {
       size: number;
       hue: number;
       life: number;
+      isFairyDust: boolean;
 
-      constructor(p: p5, x: number, y: number) {
+      constructor(p: p5, x: number, y: number, isFairyDust: boolean = false) {
         this.p = p;
         this.pos = p.createVector(x, y);
-        this.vel = p.createVector(p.random(-1, 1), p.random(1, 3));
-        this.size = p.random(4, 8);
-        this.hue = p.random(360);
+        this.isFairyDust = isFairyDust;
+        
+        if (isFairyDust) {
+          this.vel = p.createVector(p.random(-0.5, 0.5), p.random(0.5, 2));
+          this.size = p.random(2, 5);
+          this.hue = p.random(40, 60); // 金色/黄色
+        } else {
+          this.vel = p.createVector(p.random(-1, 1), p.random(1, 3));
+          this.size = p.random(4, 8);
+          this.hue = p.random(360);
+        }
         this.life = 1.0;
       }
 
       update() {
         this.pos.add(this.vel);
-        this.life -= 0.02;
+        this.life -= this.isFairyDust ? 0.015 : 0.02;
       }
 
       display() {
         this.p.noStroke();
-        this.p.fill(this.hue, 80, 100, this.life);
+        if (this.isFairyDust) {
+          // 闪烁效果
+          const sparkle = this.p.sin(this.p.frameCount * 0.5) * 0.5 + 0.5;
+          this.p.fill(this.hue, 80, 100, this.life * sparkle);
+        } else {
+          this.p.fill(this.hue, 80, 100, this.life);
+        }
         this.p.ellipse(this.pos.x, this.pos.y, this.size);
         
         const ctx = (this.p as any).drawingContext as CanvasRenderingContext2D;
         if (ctx) {
-          ctx.shadowBlur = 10;
+          ctx.shadowBlur = this.isFairyDust ? 15 : 10;
           ctx.shadowColor = this.p.color(this.hue, 100, 100, this.life).toString();
         }
       }
@@ -574,25 +668,44 @@ export default function App() {
       hue: number;
       size: number;
       life: number;
+      history: p5.Vector[] = [];
 
       constructor(p: p5, x: number, y: number) {
         this.p = p;
         this.pos = p.createVector(x, y);
-        this.vel = p.createVector(p.random(-5, 5), p.random(-5, 5));
+        this.vel = p.createVector(p.random(-8, 8), p.random(-8, 8));
         const color = p.random(METEOR_COLORS);
         this.hue = color[0];
-        this.size = p.random(5, 12);
+        this.size = p.random(12, 24); 
         this.life = 1.0;
       }
 
-      update() {
+      update(particles: MagicParticle[]) {
+        this.history.push(this.pos.copy());
+        if (this.history.length > 10) this.history.shift();
+
         this.pos.add(this.vel);
-        this.vel.y += 0.2; // 重力
-        this.life -= 0.02;
+        this.vel.y += 0.15; 
+        this.life -= 0.03; // 消失速度加快
+
+        // 洒落金色仙粉
+        if (this.p.frameCount % 2 === 0) {
+          particles.push(new MagicParticle(this.p, this.pos.x, this.pos.y, true));
+        }
       }
 
       display() {
         this.p.push();
+        
+        // 绘制拖尾
+        this.p.noFill();
+        for (let i = 0; i < this.history.length; i++) {
+          const alpha = this.p.map(i, 0, this.history.length, 0, this.life * 0.5);
+          const s = this.p.map(i, 0, this.history.length, 0, this.size);
+          this.p.fill(this.hue, 60, 100, alpha);
+          this.p.ellipse(this.history[i].x, this.history[i].y, s);
+        }
+
         this.p.translate(this.pos.x, this.pos.y);
         this.p.noStroke();
         
@@ -603,7 +716,7 @@ export default function App() {
         // 发光效果
         const ctx = (this.p as any).drawingContext as CanvasRenderingContext2D;
         if (ctx) {
-          ctx.shadowBlur = 15;
+          ctx.shadowBlur = 25;
           ctx.shadowColor = this.p.color(this.hue, 100, 100, this.life).toString();
         }
         
@@ -623,6 +736,110 @@ export default function App() {
           this.p.vertex(sx, sy);
         }
         this.p.endShape(this.p.CLOSE);
+      }
+
+      isDead() {
+        return this.life <= 0;
+      }
+    }
+
+    class Butterfly {
+      p: p5;
+      pos: p5.Vector;
+      vel: p5.Vector;
+      hue: number;
+      life: number = 1.0;
+      wingAngle: number = 0;
+      size: number;
+
+      constructor(p: p5, x: number, y: number) {
+        this.p = p;
+        this.pos = p.createVector(x, y);
+        this.vel = p.createVector(p.random(-3, 3), p.random(-4, -2));
+        this.hue = p.random(360); // 颜色完全随机
+        this.size = p.random(40, 60); // 进一步增大蝴蝶
+      }
+
+      update(particles: MagicParticle[]) {
+        this.pos.add(this.vel);
+        this.vel.x += this.p.sin(this.p.frameCount * 0.1) * 0.15;
+        this.wingAngle = this.p.sin(this.p.frameCount * 0.3) * 1.0;
+        this.life -= 0.004;
+
+        // 洒落粉末
+        if (this.p.frameCount % 8 === 0) {
+          particles.push(new MagicParticle(this.p, this.pos.x, this.pos.y, true));
+        }
+      }
+
+      display() {
+        this.p.push();
+        this.p.translate(this.pos.x, this.pos.y);
+        this.p.rotate(this.vel.heading() + this.p.HALF_PI);
+        
+        const ctx = (this.p as any).drawingContext as CanvasRenderingContext2D;
+        if (ctx) {
+          ctx.shadowBlur = 30;
+          ctx.shadowColor = this.p.color(this.hue, 100, 100, this.life).toString();
+        }
+
+        this.p.noStroke();
+        
+        // 绘制更像 🦋 的翅膀
+        for (let side of [-1, 1]) {
+          this.p.push();
+          this.p.scale(side, 1);
+          this.p.rotate(this.wingAngle * side);
+          
+          // 上大翅膀 (更圆润且向上扬)
+          this.p.fill(this.hue, 70, 100, this.life * 0.9);
+          this.p.beginShape();
+          this.p.vertex(0, 0);
+          this.p.bezierVertex(-this.size * 0.5, -this.size * 1.2, -this.size * 2.2, -this.size * 0.8, -this.size * 1.8, 0);
+          this.p.bezierVertex(-this.size * 1.5, this.size * 0.4, -this.size * 0.5, this.size * 0.2, 0, 0);
+          this.p.endShape(this.p.CLOSE);
+          
+          // 下小翅膀 (更圆且向后方)
+          this.p.fill(this.hue, 60, 100, this.life * 0.7);
+          this.p.beginShape();
+          this.p.vertex(0, 0);
+          this.p.bezierVertex(-this.size * 0.2, this.size * 0.5, -this.size * 1.5, this.size * 1.8, -this.size * 1.2, this.size * 0.5);
+          this.p.bezierVertex(-this.size * 0.8, this.size * 0.2, -this.size * 0.3, 0.1, 0, 0);
+          this.p.endShape(this.p.CLOSE);
+
+          // 翅膀花纹 (线条感)
+          this.p.stroke(255, this.life * 0.3);
+          this.p.strokeWeight(1);
+          this.p.line(0, 0, -this.size * 1.5, -this.size * 0.5);
+          this.p.line(0, 0, -this.size * 1.2, this.size * 0.8);
+          this.p.noStroke();
+
+          // 翅膀上的梦幻斑点 (🦋 标志性特征)
+          this.p.fill(255, this.life * 0.6);
+          this.p.ellipse(-this.size * 1.2, -this.size * 0.4, this.size * 0.3, this.size * 0.2);
+          this.p.ellipse(-this.size * 0.8, this.size * 0.8, this.size * 0.2, this.size * 0.2);
+          
+          this.p.pop();
+        }
+
+        // 身体 (简化为一个点)
+        this.p.fill(20, 20, 20, this.life);
+        this.p.ellipse(0, 0, this.size * 0.1, this.size * 0.1);
+        
+        // 触角 (弯曲更自然)
+        this.p.noFill();
+        this.p.stroke(255, this.life * 0.7);
+        this.p.strokeWeight(1.5);
+        this.p.beginShape();
+        this.p.vertex(-2, -this.size * 0.4);
+        this.p.bezierVertex(-5, -this.size * 0.6, -8, -this.size * 0.8, -10, -this.size * 0.7);
+        this.p.endShape();
+        this.p.beginShape();
+        this.p.vertex(2, -this.size * 0.4);
+        this.p.bezierVertex(5, -this.size * 0.6, 8, -this.size * 0.8, 10, -this.size * 0.7);
+        this.p.endShape();
+        
+        this.p.pop();
       }
 
       isDead() {
@@ -655,16 +872,44 @@ export default function App() {
       <div ref={containerRef} className="absolute inset-0 z-10" />
 
       {/* UI 覆盖层 */}
-      <div className="absolute top-8 left-8 z-20 pointer-events-none">
-        <h1 className="text-4xl font-bold text-white tracking-tighter uppercase mb-2">
-          Magic Cup
-        </h1>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'}`} />
-          <p className="text-xs text-white/50 uppercase tracking-widest font-mono">
-            {isLoading ? 'Initializing Detector...' : 'System Ready'}
-          </p>
+      <div className="absolute top-8 left-8 z-20 pointer-events-none flex flex-col gap-6">
+        <div>
+          <h1 className="text-4xl font-bold text-white tracking-tighter uppercase mb-2">
+            Magic Cup
+          </h1>
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'}`} />
+            <p className="text-xs text-white/50 uppercase tracking-widest font-mono">
+              {isLoading ? 'Initializing Detector...' : 'System Ready'}
+            </p>
+          </div>
         </div>
+
+        {!isLoading && (
+          <div className="bg-white/5 backdrop-blur-sm border border-white/5 rounded-xl p-3 max-w-fit">
+            <h3 className="text-[9px] font-bold mb-2 tracking-[0.1em] uppercase opacity-30 text-white">
+              魔法手势指南
+            </h3>
+            <ul className="space-y-1 text-[10px] text-white/60">
+              <li className="flex items-center gap-2">
+                <span className="w-1 h-1 rounded-full bg-yellow-400/60"></span>
+                <span>完全张开五指：释放金色流星</span>
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="w-1 h-1 rounded-full bg-blue-400/60"></span>
+                <span>双手合拢再打开：释放华丽蝴蝶</span>
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="w-1 h-1 rounded-full bg-purple-400/60"></span>
+                <span>手指捏合：种下梦幻花朵</span>
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="w-1 h-1 rounded-full bg-pink-400/60"></span>
+                <span>放置杯子：开出繁花</span>
+              </li>
+            </ul>
+          </div>
+        )}
       </div>
 
       {isLoading && (
@@ -690,11 +935,6 @@ export default function App() {
         </div>
       )}
 
-      <div className="absolute bottom-8 right-8 z-20 text-right pointer-events-none">
-        <p className="text-[10px] text-white/30 uppercase tracking-[0.2em]">
-          Instructions: Place a cup in view to see it bloom 🌼
-        </p>
-      </div>
     </div>
   );
 }
