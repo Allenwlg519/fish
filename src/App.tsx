@@ -3,304 +3,344 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import p5 from 'p5';
+import { ObjectDetector, HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
-// --- 配置变量 ---
-const BG_COLOR = '#e1f5fe'; // 浅蓝色背景
-const FISH_COLOR = '#0288d1'; // 稍深一点的蓝色鱼身
-const SPOT_COLOR = '#01579b'; // 更深的蓝色斑点
-const ORB_COLOR = '#ff1744'; // 鲜艳的红色
-const EYE_COLOR = '#ffffff';
-const EYE_PUPIL = '#000000';
+const FLOWER_COLORS = [
+  [330, 80, 100], // 粉色
+  [280, 70, 100], // 紫色
+  [200, 60, 100], // 浅蓝
+  [45, 90, 100],  // 橙黄
+  [10, 80, 100],  // 红色
+];
 
-const FISH_COUNT = 500; // 增加数量以提高密度
-const SPRITE_FRAMES = 20; // 动画帧数
-const FISH_WIDTH = 60;
-const FISH_HEIGHT = 30;
-const FRICTION = 0.92; // 摩擦力系数
-const FLUSH_FRICTION = 0.85; // flushOut 时的摩擦力系数（更紧凑）
-
-const GLOBAL_ANGLE = -60; // 鱼群运动角度
+const METEOR_COLORS = [
+  [50, 100, 100],  // 金色
+  [180, 100, 100], // 蓝绿
+  [300, 100, 100], // 紫红
+];
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const sketch = (p: p5) => {
-      let spriteSheet: p5.Graphics;
-      let fishes: Fish[] = [];
-      let orb: Orb;
-      let flushOut = false;
-      let flushStartTime = 0;
+    let objectDetector: ObjectDetector | null = null;
+    let handLandmarker: HandLandmarker | null = null;
+    let lastVideoTime = -1;
+    let results: any = null;
+    let handResults: any = null;
 
-      // --- 鱼类绘制函数 (用于预渲染) ---
-      const drawFishFrame = (pg: p5.Graphics, phase: number) => {
-        pg.push();
-        pg.translate(FISH_WIDTH / 2, FISH_HEIGHT / 2);
+    const initMediaPipe = async () => {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
         
-        // 鱼身 - 贝塞尔曲线
-        pg.noStroke();
-        pg.fill(FISH_COLOR);
-        // 使用 bezier 直接绘制两半鱼身并填充
-        pg.beginShape();
-        pg.vertex(-25, 0);
-        (pg as any).bezierVertex(-15, -15, 15, -15, 25, 0);
-        (pg as any).bezierVertex(15, 15, -15, 15, -25, 0);
-        pg.endShape(p.CLOSE);
+        // 初始化物体识别
+        objectDetector = await ObjectDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`,
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          scoreThreshold: 0.2,
+        });
 
-        // 斑点 - 随机分布 (固定种子保证每帧斑点位置一致)
-        pg.randomSeed(42);
-        pg.fill(SPOT_COLOR);
-        for (let i = 0; i < 8; i++) {
-          let rx = pg.random(-15, 15);
-          let ry = pg.random(-5, 5);
-          pg.ellipse(rx, ry, pg.random(2, 5));
-        }
+        // 初始化手部识别
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 2
+        });
 
-        // 鱼尾 - 根据 sin(phase) 摆动
-        let tailSwing = p.sin(phase) * 15;
-        pg.push();
-        pg.translate(-25, 0);
-        pg.rotate(p.radians(tailSwing));
-        pg.fill(FISH_COLOR);
-        pg.beginShape();
-        pg.vertex(0, 0);
-        (pg as any).bezierVertex(-15, -10, -15, 10, 0, 0);
-        pg.endShape(p.CLOSE);
-        pg.pop();
-
-        // 眼睛
-        pg.fill(EYE_COLOR);
-        pg.ellipse(18, -4, 6, 6);
-        pg.fill(EYE_PUPIL);
-        pg.ellipse(19, -4, 3, 3);
-        pg.fill(255, 200); // 高光
-        pg.ellipse(17, -5, 2, 2);
-
-        pg.pop();
-      };
-
-      // --- Fish 类 ---
-      class Fish {
-        pos: p5.Vector;
-        vel: p5.Vector;
-        depth: number;
-        phase: number;
-        phaseOffset: number;
-        offsetX: number;
-        offsetY: number;
-        id: number;
-
-        constructor(id: number) {
-          this.id = id;
-          this.pos = p.createVector(p.random(p.width), p.random(p.height));
-          this.depth = p.random(0, 1);
-          this.phaseOffset = p.random(p.TWO_PI);
-          this.phase = 0;
-          this.offsetX = 0;
-          this.offsetY = 0;
-          
-          let angleRad = p.radians(GLOBAL_ANGLE);
-          let speed = p.map(this.depth, 0, 1, 1, 3);
-          this.vel = p.createVector(p.cos(angleRad) * speed, p.sin(angleRad) * speed);
-        }
-
-        update() {
-          // 基础运动
-          let currentSpeedMult = 1;
-          if (flushOut) {
-            let t = p.constrain((p.millis() - flushStartTime) / 2000, 0, 1);
-            // 三次方缓动加速: t^3
-            currentSpeedMult = 1 + (t * t * t) * 5;
-          }
-
-          this.pos.x += this.vel.x * currentSpeedMult;
-          this.pos.y += this.vel.y * currentSpeedMult;
-
-          // 水流起伏感 (正弦波)
-          this.pos.y += p.sin(p.frameCount * 0.05 + this.phaseOffset) * 0.5;
-
-          // 碰撞检测 (当红鱼穿过蓝鱼时，蓝鱼产生轻微抖动)
-          if (orb && orb.pos) {
-            let d = p.dist(this.pos.x, this.pos.y, orb.pos.x, orb.pos.y);
-            if (d < 40) {
-              this.offsetX += p.random(-5, 5);
-              this.offsetY += p.random(-5, 5);
-            }
-          }
-
-          // 摩擦力衰减
-          let f = flushOut ? FLUSH_FRICTION : FRICTION;
-          this.offsetX *= f;
-          this.offsetY *= f;
-
-          // 边界重置
-          if (this.pos.x < -100 || this.pos.x > p.width + 100 || this.pos.y < -100 || this.pos.y > p.height + 100) {
-            this.reset();
-          }
-
-          this.phase = (p.frameCount * 0.2 + this.phaseOffset) % p.TWO_PI;
-        }
-
-        reset() {
-          let angleRad = p.radians(GLOBAL_ANGLE);
-          let vx = p.cos(angleRad);
-          let vy = p.sin(angleRad);
-
-          // 随机选择重置到左/右边缘还是上/下边缘，以保持均匀分布
-          // 根据运动方向选择“入口”边缘
-          if (p.random() > 0.5) {
-            // 重置到 X 轴边缘 (左或右)
-            this.pos.x = vx > 0 ? -100 : p.width + 100;
-            this.pos.y = p.random(p.height);
-          } else {
-            // 重置到 Y 轴边缘 (上或下)
-            this.pos.x = p.random(p.width);
-            this.pos.y = vy > 0 ? -100 : p.height + 100;
-          }
-          
-          this.offsetX = 0;
-          this.offsetY = 0;
-        }
-
-        draw() {
-          let frameIdx = p.floor(p.map(p.sin(this.phase), -1, 1, 0, SPRITE_FRAMES - 1));
-          let size = p.map(this.depth, 0, 1, 0.4, 1.2);
-          let alpha = p.map(this.depth, 0, 1, 100, 255);
-
-          p.push();
-          p.translate(this.pos.x + this.offsetX, this.pos.y + this.offsetY);
-          p.rotate(p.radians(GLOBAL_ANGLE));
-          p.scale(size);
-          p.tint(255, alpha);
-          
-          // 精灵图切片渲染
-          p.image(
-            spriteSheet,
-            -FISH_WIDTH / 2, -FISH_HEIGHT / 2,
-            FISH_WIDTH, FISH_HEIGHT,
-            frameIdx * FISH_WIDTH, 0,
-            FISH_WIDTH, FISH_HEIGHT
-          );
-          p.pop();
-        }
+        setIsLoading(false);
+      } catch (err) {
+        console.error("MediaPipe initialization failed:", err);
+        setError("无法加载识别模型。请检查网络连接或刷新页面重试。");
       }
+    };
 
-      // --- Orb 类 (粉鱼) ---
-      class Orb {
-        pos: p5.Vector;
-        vel: p5.Vector;
+    initMediaPipe();
 
-        constructor() {
-          // 初始位置在屏幕右侧或上方，准备逆流而上
-          this.pos = p.createVector(p.width * 0.9, p.height * 0.1);
-          
-          // 逆着全局角度游动 (GLOBAL_ANGLE + 180)
-          let oppositeAngle = p.radians(GLOBAL_ANGLE + 180);
-          let speed = 2.5;
-          this.vel = p.createVector(p.cos(oppositeAngle) * speed, p.sin(oppositeAngle) * speed);
-        }
-
-        update() {
-          this.pos.x += this.vel.x;
-          this.pos.y += this.vel.y;
-
-          // 屏幕环绕：确保它始终从鱼群的前方出现并逆流而行
-          if (this.pos.x < -50) this.pos.x = p.width + 50;
-          if (this.pos.x > p.width + 50) this.pos.x = -50;
-          if (this.pos.y < -50) this.pos.y = p.height + 50;
-          if (this.pos.y > p.height + 50) this.pos.y = -50;
-
-          // 触发 flushOut (当红鱼靠近鱼群密集区时触发加速反应)
-          if (!flushOut && p.dist(this.pos.x, this.pos.y, p.width * 0.5, p.height * 0.5) < 200) {
-            flushOut = true;
-            flushStartTime = p.millis();
-          }
-        }
-
-        draw() {
-          p.push();
-          p.translate(this.pos.x, this.pos.y);
-          p.rotate(this.vel.heading());
-          
-          // 绘制红鱼身体
-          p.noStroke();
-          p.fill(ORB_COLOR);
-          p.ellipse(0, 0, 40, 20);
-          
-          // 鱼尾摆动
-          let tailPhase = p.sin(p.millis() * 0.01);
-          p.push();
-          p.translate(-18, 0);
-          p.rotate(tailPhase * 0.3);
-          p.beginShape();
-          p.vertex(0, 0);
-          p.bezierVertex(-10, -10, -15, -15, -20, -10);
-          p.bezierVertex(-18, -5, -18, 5, -20, 10);
-          p.bezierVertex(-15, 15, -10, 10, 0, 0);
-          p.endShape(p.CLOSE);
-          p.pop();
-
-          // 眼睛
-          p.fill(255, 150);
-          p.ellipse(10, -4, 8, 8);
-          p.fill(0);
-          p.ellipse(11, -4, 4, 4);
-          
-          p.pop();
-        }
-      }
+    const sketch = (p: p5) => {
+      let flowers: GrowingFlower[] = [];
+      let groundFlowers: GroundFlower[] = [];
+      let meteors: Meteor[] = [];
+      let particles: MagicParticle[] = [];
+      let canvas: p5.Renderer;
+      let detectedObjects: any[] = [];
+      let detectedHands: any[] = [];
+      let prevHandPos: p5.Vector[] = [];
+      let swayFactor = 0;
 
       p.setup = () => {
-        p.createCanvas(p.windowWidth, p.windowHeight);
+        canvas = p.createCanvas(p.windowWidth, p.windowHeight);
+        p.colorMode(p.HSB, 360, 100, 100, 1);
         
-        // 创建精灵图画布
-        spriteSheet = p.createGraphics(FISH_WIDTH * SPRITE_FRAMES, FISH_HEIGHT);
-        for (let i = 0; i < SPRITE_FRAMES; i++) {
-          let phase = p.map(i, 0, SPRITE_FRAMES, 0, p.TWO_PI);
-          p.push();
-          spriteSheet.push();
-          spriteSheet.translate(i * FISH_WIDTH, 0);
-          drawFishFrame(spriteSheet, phase);
-          spriteSheet.pop();
-          p.pop();
+        // 设置视频流
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          navigator.mediaDevices.getUserMedia({ 
+            video: { 
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            } 
+          }).then((stream) => {
+            if (videoRef.current) {
+              videoRef.current.srcObject = stream;
+              // 确保视频元数据加载后再播放
+              videoRef.current.onloadedmetadata = () => {
+                videoRef.current?.play();
+              };
+            }
+          }).catch(err => {
+            console.error("Camera access denied:", err);
+            setError("无法访问摄像头，请确保已授予权限。");
+          });
         }
-
-        // 初始化鱼群
-        for (let i = 0; i < FISH_COUNT; i++) {
-          fishes.push(new Fish(i));
-        }
-
-        orb = new Orb();
       };
 
       p.draw = () => {
-        p.background(BG_COLOR);
+        p.clear();
+        
+        const video = videoRef.current;
+        const isVideoReady = !!(
+          video && 
+          video instanceof HTMLVideoElement && 
+          video.readyState >= 2 && 
+          video.videoWidth > 0 && 
+          video.videoHeight > 0
+        );
 
-        // 更新逻辑
-        orb.update();
-        for (let fish of fishes) {
-          fish.update();
+        // 1. 处理物体识别
+        if (isVideoReady) {
+          try {
+            let startTimeMs = performance.now();
+            if (lastVideoTime !== video.currentTime) {
+              lastVideoTime = video.currentTime;
+              
+              if (objectDetector) {
+                results = objectDetector.detectForVideo(video, startTimeMs);
+                detectedObjects = results.detections || [];
+              }
+              
+              if (handLandmarker) {
+                handResults = handLandmarker.detectForVideo(video, startTimeMs);
+                detectedHands = handResults.landmarks || [];
+              }
+            }
+          } catch (err) {
+            console.error("Detection error:", err);
+          }
         }
 
-        // 深度排序 (depth 映射伪空间感)
-        fishes.sort((a, b) => a.depth - b.depth);
+        // 2. 绘制视频背景 (镜像)
+        let dw = p.width;
+        let dh = p.height;
+        let offsetX = 0;
+        let offsetY = 0;
 
-        // 渲染
-        for (let fish of fishes) {
-          fish.draw();
+        if (isVideoReady) {
+          const ctx = (p as any).drawingContext as CanvasRenderingContext2D;
+          if (ctx) {
+            ctx.save();
+            ctx.translate(p.width, 0);
+            ctx.scale(-1, 1);
+            
+            let vRatio = video.videoWidth / video.videoHeight;
+            let cRatio = p.width / p.height;
+            
+            if (vRatio > cRatio) {
+              dh = p.height;
+              dw = p.height * vRatio;
+            } else {
+              dw = p.width;
+              dh = p.width / vRatio;
+            }
+            
+            offsetX = (p.width - dw) / 2;
+            offsetY = (p.height - dh) / 2;
+            
+            ctx.globalAlpha = 1.0;
+            ctx.drawImage(video, offsetX, offsetY, dw, dh);
+            ctx.restore();
+          }
         }
 
-        orb.draw();
+        // 3. 处理开花逻辑 & 调试显示
+        if (detectedObjects.length > 0) {
+          const vWidth = video?.videoWidth || 1;
+          const vHeight = video?.videoHeight || 1;
 
-        // UI 提示
-        p.fill(0, 100); // 改为黑色半透明
-        p.noStroke();
-        p.textSize(14);
-        p.text(`Fish Count: ${FISH_COUNT} | FlushOut: ${flushOut ? 'ON' : 'OFF'}`, 20, 30);
+          // 标记当前帧识别到的杯子位置
+          const currentCups: {x: number, y: number, w: number, id: string}[] = [];
+
+          for (const detection of detectedObjects) {
+            const category = detection.categories[0].categoryName.toLowerCase();
+            const score = detection.categories[0].score;
+            const box = detection.boundingBox;
+            
+            // 识别杯子及类似物体
+            const targetCategories = ['cup', 'wine glass', 'mug', 'bottle', 'bowl', 'vase', 'can'];
+            if (box && targetCategories.includes(category)) {
+              const vx = box.originX + box.width / 2;
+              const vy = box.originY;
+              
+              const mappedX = offsetX + vx * (dw / vWidth);
+              const mappedY = offsetY + vy * (dh / vHeight);
+              
+              const centerX = p.width - mappedX;
+              const topY = mappedY;
+              
+              currentCups.push({ 
+                x: centerX, 
+                y: topY, 
+                w: box.width * (dw / vWidth),
+                id: `${category}_${Math.round(box.originX)}` 
+              });
+
+              // 调试：绘制识别框
+              const canvasRectX = p.width - (offsetX + (box.originX + box.width) * (dw / vWidth));
+              const canvasRectY = offsetY + box.originY * (dh / vHeight);
+              p.noFill();
+              p.stroke(120, 80, 100, 0.3); // 降低调试框亮度
+              p.strokeWeight(1);
+              p.rect(canvasRectX, canvasRectY, box.width * (dw / vWidth), box.height * (dh / vHeight));
+            }
+          }
+
+          // 更新或创建花朵 (茂密模式：每个杯子对应多朵花)
+          for (const cup of currentCups) {
+            // 检查该杯子附近已有的花朵数量
+            let nearbyFlowers = flowers.filter(f => !f.isFalling && p.dist(cup.x, cup.y, f.pos.x, f.pos.y) < cup.w / 2);
+            
+            // 如果花朵不够茂密，则在杯口范围内随机生成
+            if (nearbyFlowers.length < 12 && flowers.length < 200) {
+              const offsetX = p.random(-cup.w / 3, cup.w / 3);
+              flowers.push(new GrowingFlower(p, cup.x + offsetX, cup.y));
+            }
+
+            // 更新已有花朵的目标位置，让它们跟随杯子
+            for (let flower of nearbyFlowers) {
+              flower.updateTarget(cup.x + (flower.pos.x - cup.x), cup.y);
+            }
+          }
+        }
+
+        // 4. 处理手部魔法 (流星 & 颗粒 & 捏合)
+        if (detectedHands.length > 0) {
+          let totalHandX = 0;
+          for (let i = 0; i < detectedHands.length; i++) {
+            const hand = detectedHands[i];
+            const wrist = hand[0];
+            const mappedX = p.width - (offsetX + wrist.x * dw);
+            const mappedY = offsetY + wrist.y * dh;
+            const currentPos = p.createVector(mappedX, mappedY);
+
+            // 产生随动作掉落的魔法颗粒
+            if (prevHandPos[i]) {
+              const dist = p.dist(currentPos.x, currentPos.y, prevHandPos[i].x, prevHandPos[i].y);
+              if (dist > 5) {
+                for (let j = 0; j < 2; j++) {
+                  particles.push(new MagicParticle(p, mappedX, mappedY));
+                }
+              }
+            }
+            prevHandPos[i] = currentPos;
+            totalHandX += mappedX;
+
+            // 判断是否张开手掌 (流星)
+            const isPalmOpen = (p as any).checkPalmOpen(hand);
+            if (isPalmOpen) {
+              const palmX = (hand[0].x + hand[5].x + hand[17].x) / 3;
+              const palmY = (hand[0].y + hand[5].y + hand[17].y) / 3;
+              const centerX = p.width - (offsetX + palmX * dw);
+              const topY = offsetY + palmY * dh;
+              for (let j = 0; j < 2; j++) {
+                meteors.push(new Meteor(p, centerX, topY));
+              }
+            }
+
+            // 判断是否捏合 (捏合产生地上的花)
+            const isPinching = (p as any).checkPinch(hand);
+            if (isPinching) {
+              const indexTip = hand[8];
+              const thumbTip = hand[4];
+              const pinchX = p.width - (offsetX + (indexTip.x + thumbTip.x) / 2 * dw);
+              // 在屏幕下方对应位置长出花
+              if (p.frameCount % 10 === 0) {
+                groundFlowers.push(new GroundFlower(p, pinchX, p.height - 10));
+              }
+            }
+          }
+          // 计算摇晃因子 (基于手部平均水平位置的变化)
+          const avgHandX = totalHandX / detectedHands.length;
+          swayFactor = p.map(avgHandX, 0, p.width, -1, 1);
+        } else {
+          swayFactor = p.lerp(swayFactor, 0, 0.05);
+        }
+
+        // 更新和绘制魔法颗粒
+        for (let i = particles.length - 1; i >= 0; i--) {
+          particles[i].update();
+          particles[i].display();
+          if (particles[i].isDead()) particles.splice(i, 1);
+        }
+
+        // 更新和绘制地面花朵
+        for (let i = groundFlowers.length - 1; i >= 0; i--) {
+          groundFlowers[i].update(swayFactor);
+          groundFlowers[i].display();
+          if (groundFlowers[i].isDead()) groundFlowers.splice(i, 1);
+        }
+
+        // 更新和绘制花朵 (杯子上的)
+        for (let i = flowers.length - 1; i >= 0; i--) {
+          flowers[i].update();
+          flowers[i].display();
+          if (flowers[i].isDead()) {
+            flowers.splice(i, 1);
+          }
+        }
+
+        // 更新和绘制流星
+        for (let i = meteors.length - 1; i >= 0; i--) {
+          meteors[i].update();
+          meteors[i].display();
+          if (meteors[i].isDead()) {
+            meteors.splice(i, 1);
+          }
+        }
+      };
+
+      // 检查手掌是否张开
+      (p as any).checkPalmOpen = (hand: any[]) => {
+        const wrist = hand[0];
+        const fingers = [8, 12, 16, 20]; // 指尖
+        const bases = [5, 9, 13, 17];    // 指根
+        let openCount = 0;
+        for (let i = 0; i < fingers.length; i++) {
+          const tipDist = p.dist(wrist.x, wrist.y, hand[fingers[i]].x, hand[fingers[i]].y);
+          const baseDist = p.dist(wrist.x, wrist.y, hand[bases[i]].x, hand[bases[i]].y);
+          if (tipDist > baseDist * 1.2) openCount++;
+        }
+        return openCount >= 3;
+      };
+
+      // 检查是否捏合 (大拇指和食指)
+      (p as any).checkPinch = (hand: any[]) => {
+        const thumbTip = hand[4];
+        const indexTip = hand[8];
+        const distance = p.dist(thumbTip.x, thumbTip.y, indexTip.x, indexTip.y);
+        return distance < 0.05;
       };
 
       p.windowResized = () => {
@@ -308,22 +348,353 @@ export default function App() {
       };
     };
 
+    class GrowingFlower {
+      p: p5;
+      pos: p5.Vector;
+      targetPos: p5.Vector;
+      vel: p5.Vector;
+      growth: number;
+      maxGrowth: number;
+      hue: number;
+      petals: number;
+      life: number;
+      maxLife: number = 60; 
+      isWithered: boolean = false;
+      isFalling: boolean = false;
+      stemPoints: p5.Vector[] = [];
+      fallTimer: number;
+
+      constructor(p: p5, x: number, y: number) {
+        this.p = p;
+        this.pos = p.createVector(x, y);
+        this.targetPos = p.createVector(x, y);
+        this.vel = p.createVector(0, 0);
+        this.growth = 0;
+        this.maxGrowth = p.random(30, 60);
+        this.life = this.maxLife;
+        this.fallTimer = p.random(100, 200); // 生长一段时间后掉落
+        
+        const color = p.random(FLOWER_COLORS);
+        this.hue = color[0];
+        this.petals = p.floor(p.random(5, 8));
+
+        for (let i = 0; i < 5; i++) {
+          this.stemPoints.push(p.createVector(p.random(-5, 5), -i * 10));
+        }
+      }
+
+      updateTarget(x: number, y: number) {
+        if (!this.isFalling) {
+          this.targetPos.set(x, y);
+          this.life = this.maxLife;
+          this.isWithered = false;
+        }
+      }
+
+      update() {
+        if (this.isFalling) {
+          this.vel.y += 0.1; // 重力
+          this.pos.add(this.vel);
+          this.growth -= 0.005; // 掉落时慢慢枯萎
+        } else {
+          this.pos.x = this.p.lerp(this.pos.x, this.targetPos.x, 0.1);
+          this.pos.y = this.p.lerp(this.pos.y, this.targetPos.y, 0.1);
+
+          if (this.life > 0) {
+            this.life--;
+            if (this.growth < 1) this.growth += 0.02;
+            
+            this.fallTimer--;
+            if (this.fallTimer <= 0) {
+              this.isFalling = true;
+              this.vel = this.p.createVector(this.p.random(-1, 1), this.p.random(-2, 0));
+            }
+          } else {
+            this.isWithered = true;
+            if (this.growth > 0) this.growth -= 0.02;
+          }
+        }
+      }
+
+      display() {
+        if (this.growth <= 0) return;
+
+        this.p.push();
+        this.p.translate(this.pos.x, this.pos.y);
+        
+        const currentHeight = this.growth * this.maxGrowth;
+        
+        // 掉落时不画茎
+        if (!this.isFalling) {
+          this.p.noFill();
+          this.p.stroke(120, 60, 60, this.growth);
+          this.p.strokeWeight(2 * this.growth);
+          this.p.beginShape();
+          this.p.vertex(0, 0);
+          for (let i = 1; i < this.stemPoints.length; i++) {
+            const pt = this.stemPoints[i];
+            this.p.curveVertex(pt.x * this.growth, pt.y * this.growth * (this.maxGrowth/40));
+          }
+          this.p.endShape();
+        }
+
+        const flowerY = this.isFalling ? 0 : -currentHeight;
+        this.p.translate(0, flowerY);
+        this.p.rotate(this.p.frameCount * 0.02 + (this.isFalling ? this.p.frameCount * 0.05 : 0));
+        
+        const flowerSize = 20 * this.growth;
+        this.drawFlowerHead(flowerSize);
+        
+        this.p.pop();
+      }
+
+      drawFlowerHead(size: number) {
+        this.p.noStroke();
+        this.p.fill(this.hue, 70, 100, this.growth);
+        for (let i = 0; i < this.petals; i++) {
+          this.p.push();
+          this.p.rotate((this.p.TWO_PI / this.petals) * i);
+          this.p.ellipse(size * 0.4, 0, size * 0.6, size * 0.3);
+          this.p.pop();
+        }
+        this.p.fill(60, 80, 100, this.growth);
+        this.p.ellipse(0, 0, size * 0.3);
+      }
+
+      isDead() {
+        return (this.isWithered || this.isFalling) && this.growth <= 0;
+      }
+    }
+
+    class GroundFlower {
+      p: p5;
+      pos: p5.Vector;
+      growth: number;
+      maxGrowth: number;
+      hue: number;
+      petals: number;
+      sway: number = 0;
+      life: number = 1.0;
+
+      constructor(p: p5, x: number, y: number) {
+        this.p = p;
+        this.pos = p.createVector(x, y);
+        this.growth = 0;
+        this.maxGrowth = p.random(40, 100);
+        const color = p.random(FLOWER_COLORS);
+        this.hue = color[0];
+        this.petals = p.floor(p.random(5, 8));
+      }
+
+      update(swayFactor: number) {
+        if (this.growth < 1) this.growth += 0.05;
+        this.sway = this.p.lerp(this.sway, swayFactor * 20, 0.1);
+        this.life -= 0.002; // 地面花朵寿命较长
+      }
+
+      display() {
+        this.p.push();
+        this.p.translate(this.pos.x, this.pos.y);
+        
+        const h = this.growth * this.maxGrowth;
+        
+        // 绘制茎
+        this.p.stroke(120, 60, 60, this.life);
+        this.p.strokeWeight(3);
+        this.p.noFill();
+        this.p.bezier(0, 0, this.sway/2, -h/3, this.sway, -h/2, this.sway, -h);
+        
+        // 绘制花头
+        this.p.translate(this.sway, -h);
+        this.p.rotate(this.p.frameCount * 0.02);
+        
+        const size = 20 * this.growth;
+        this.p.noStroke();
+        this.p.fill(this.hue, 70, 100, this.life);
+        for (let i = 0; i < this.petals; i++) {
+          this.p.push();
+          this.p.rotate((this.p.TWO_PI / this.petals) * i);
+          this.p.ellipse(size * 0.4, 0, size * 0.6, size * 0.3);
+          this.p.pop();
+        }
+        this.p.fill(60, 80, 100, this.life);
+        this.p.ellipse(0, 0, size * 0.3);
+        
+        this.p.pop();
+      }
+
+      isDead() {
+        return this.life <= 0;
+      }
+    }
+
+    class MagicParticle {
+      p: p5;
+      pos: p5.Vector;
+      vel: p5.Vector;
+      size: number;
+      hue: number;
+      life: number;
+
+      constructor(p: p5, x: number, y: number) {
+        this.p = p;
+        this.pos = p.createVector(x, y);
+        this.vel = p.createVector(p.random(-1, 1), p.random(1, 3));
+        this.size = p.random(4, 8);
+        this.hue = p.random(360);
+        this.life = 1.0;
+      }
+
+      update() {
+        this.pos.add(this.vel);
+        this.life -= 0.02;
+      }
+
+      display() {
+        this.p.noStroke();
+        this.p.fill(this.hue, 80, 100, this.life);
+        this.p.ellipse(this.pos.x, this.pos.y, this.size);
+        
+        const ctx = (this.p as any).drawingContext as CanvasRenderingContext2D;
+        if (ctx) {
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = this.p.color(this.hue, 100, 100, this.life).toString();
+        }
+      }
+
+      isDead() {
+        return this.life <= 0;
+      }
+    }
+
+    class Meteor {
+      p: p5;
+      pos: p5.Vector;
+      vel: p5.Vector;
+      hue: number;
+      size: number;
+      life: number;
+
+      constructor(p: p5, x: number, y: number) {
+        this.p = p;
+        this.pos = p.createVector(x, y);
+        this.vel = p.createVector(p.random(-5, 5), p.random(-5, 5));
+        const color = p.random(METEOR_COLORS);
+        this.hue = color[0];
+        this.size = p.random(5, 12);
+        this.life = 1.0;
+      }
+
+      update() {
+        this.pos.add(this.vel);
+        this.vel.y += 0.2; // 重力
+        this.life -= 0.02;
+      }
+
+      display() {
+        this.p.push();
+        this.p.translate(this.pos.x, this.pos.y);
+        this.p.noStroke();
+        
+        // 绘制星形
+        this.p.fill(this.hue, 80, 100, this.life);
+        this.drawStar(0, 0, this.size, this.size / 2, 5);
+        
+        // 发光效果
+        const ctx = (this.p as any).drawingContext as CanvasRenderingContext2D;
+        if (ctx) {
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = this.p.color(this.hue, 100, 100, this.life).toString();
+        }
+        
+        this.p.pop();
+      }
+
+      drawStar(x: number, y: number, radius1: number, radius2: number, npoints: number) {
+        let angle = this.p.TWO_PI / npoints;
+        let halfAngle = angle / 2.0;
+        this.p.beginShape();
+        for (let a = 0; a < this.p.TWO_PI; a += angle) {
+          let sx = x + this.p.cos(a) * radius2;
+          let sy = y + this.p.sin(a) * radius2;
+          this.p.vertex(sx, sy);
+          sx = x + this.p.cos(a + halfAngle) * radius1;
+          sy = y + this.p.sin(a + halfAngle) * radius1;
+          this.p.vertex(sx, sy);
+        }
+        this.p.endShape(this.p.CLOSE);
+      }
+
+      isDead() {
+        return this.life <= 0;
+      }
+    }
+
     const p5Instance = new p5(sketch, containerRef.current);
 
     return () => {
       p5Instance.remove();
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+      }
     };
   }, []);
 
   return (
-    <div 
-      ref={containerRef} 
-      style={{ 
-        width: '100vw', 
-        height: '100vh', 
-        overflow: 'hidden',
-        backgroundColor: BG_COLOR 
-      }} 
-    />
+    <div className="relative w-screen h-screen bg-black overflow-hidden font-sans">
+      {/* 隐藏的视频元素用于 MediaPipe 处理 */}
+      <video
+        ref={videoRef}
+        className="hidden"
+        playsInline
+        muted
+      />
+
+      {/* p5.js 画布容器 */}
+      <div ref={containerRef} className="absolute inset-0 z-10" />
+
+      {/* UI 覆盖层 */}
+      <div className="absolute top-8 left-8 z-20 pointer-events-none">
+        <h1 className="text-4xl font-bold text-white tracking-tighter uppercase mb-2">
+          Magic Cup
+        </h1>
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'}`} />
+          <p className="text-xs text-white/50 uppercase tracking-widest font-mono">
+            {isLoading ? 'Initializing Detector...' : 'System Ready'}
+          </p>
+        </div>
+      </div>
+
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center z-30 bg-black">
+          <div className="text-center">
+            <div className="w-16 h-16 border-4 border-yellow-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-yellow-500 font-mono text-sm tracking-widest uppercase">Loading Object Detector...</p>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center z-40 bg-black/80 backdrop-blur-md">
+          <div className="bg-red-500/10 border border-red-500 p-8 rounded-2xl max-w-md text-center">
+            <p className="text-red-500 font-bold mb-4">{error}</p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="px-6 py-2 bg-red-500 text-white rounded-full text-sm font-bold hover:bg-red-600 transition-colors"
+            >
+              重试
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="absolute bottom-8 right-8 z-20 text-right pointer-events-none">
+        <p className="text-[10px] text-white/30 uppercase tracking-[0.2em]">
+          Instructions: Place a cup in view to see it bloom 🌼
+        </p>
+      </div>
+    </div>
   );
 }
